@@ -7,7 +7,7 @@ All notable changes to Desks are listed here. The format follows
 ## [Unreleased]
 
 ### Fixed
-- Desks no longer takes focus away from system prompts (Touch ID, password sheets) or dialogs. After a window closes, Desks now moves focus only when it landed in a hidden window. Before, a closing popup (such as Chrome's autofill list) made Desks focus the last window again, which cancelled the Touch ID prompt.
+- Desks no longer takes focus away from system prompts (Touch ID, password sheets) or dialogs. After a window closes, Desks now moves focus only when it landed in a hidden window, or when the app has no window left on screen. Before, a closing popup (such as Chrome's autofill list) made Desks focus the last window again, which cancelled the Touch ID prompt.
 
 ## [0.2.0] - 2026-11-03
 
