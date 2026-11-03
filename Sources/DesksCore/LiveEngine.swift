@@ -546,30 +546,23 @@ final class LiveEngine: DesksEngine {
         }
     }
 
+    /// Only steps in when focus really landed in a parked window. Anything else (a system prompt
+    /// such as Touch ID or a password sheet, a dialog, an app Desks does not track, no window at all)
+    /// is left alone: taking focus from it would cancel it. A popup closing (Chrome autofill) also
+    /// sends a destroyed event, so this runs often.
     private func focusAfterClose(display: String?) {
         guard active, let uuid = display.flatMap({ connectedSet.contains($0) ? $0 : nil }) ?? mainUUID else { return }
         guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              let watcher = tracker.watcher(front) else {
-            if !focusMRU(on: uuid, excluding: nil) { focusAwayFromParked() }
-            return
-        }
+              let watcher = tracker.watcher(front) else { return }
         watcher.queue.async { [weak self] in
             let focused = AX.element(watcher.app, kAXFocusedWindowAttribute).flatMap(AX.windowId)
             DispatchQueue.main.async {
-                guard let self else { return }
-                if let focused, self.isShown(focused) { return }
+                guard let self, self.active, let focused,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == front,
+                      self.model.record(forWindowId: focused) != nil, self.parking.isParked(focused) else { return }
                 if !self.focusMRU(on: uuid, excluding: nil) { self.focusAwayFromParked() }
             }
         }
-    }
-
-    private func isShown(_ windowId: CGWindowID) -> Bool {
-        let connected = connectedSet
-        if let record = model.record(forWindowId: windowId) {
-            return model.isVisible(record, connected: connected, mainUUID: mainUUID) && live[windowId]?.isMinimized != true
-        }
-        if followers[windowId] != nil { return !parking.isParked(windowId) }
-        return false
     }
 
     // MARK: Snapshots
