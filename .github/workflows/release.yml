@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CI: "true"
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the app version
+        run: |
+          version="${TAG#v}"
+          plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag $TAG is not of the form vX.Y.Z" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$plist_version" ]]; then
+            echo "Tag $TAG does not match CFBundleShortVersionString $plist_version in Resources/Info.plist" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Extract the release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+          ' CHANGELOG.md > notes-body.md
+          if ! grep -q '[^[:space:]]' notes-body.md; then
+            echo "No CHANGELOG.md section found for $VERSION" >&2
+            exit 1
+          fi
+          {
+            cat notes-body.md
+            echo
+            echo "## Install"
+            echo
+            echo "Download \`Desks-$VERSION.zip\`, unzip it and move \`Desks.app\` to \`/Applications\`."
+            echo "**This build is not notarized.** The first time, right-click Desks and choose Open, then grant Accessibility access."
+            echo "It is signed ad-hoc, so macOS asks for the Accessibility permission again after each update."
+            echo
+            echo "Check the download with \`shasum -a 256 -c Desks-$VERSION.zip.sha256\`."
+          } > notes.md
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Build and sign the app
+        run: scripts/build-app.sh
+
+      - name: Verify the signature
+        run: codesign --verify --deep --strict --verbose=2 build/Desks.app
+
+      - name: Create the zip and checksum
+        run: |
+          ditto -c -k --keepParent build/Desks.app "Desks-$VERSION.zip"
+          shasum -a 256 "Desks-$VERSION.zip" > "Desks-$VERSION.zip.sha256"
+          cat "Desks-$VERSION.zip.sha256"
+
+      - name: Create the GitHub Release
+        run: |
+          gh release create "$TAG" \
+            "Desks-$VERSION.zip" "Desks-$VERSION.zip.sha256" \
+            --title "Desks $VERSION" \
+            --notes-file notes.md \
+            --verify-tag

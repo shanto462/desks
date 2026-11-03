@@ -1,0 +1,17 @@
+# Swift Package Manager and build output
+.build/
+.swiftpm/
+build/
+*.xcodeproj
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# Local signing material (created by scripts/make-signing-identity.sh outside the repo)
+*.keychain-db
+keychain-password
+
+# Editor files
+.idea/
+.vscode/

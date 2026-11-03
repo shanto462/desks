@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an idea
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem do you want to solve?
+      description: Tell us about your situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like Desks to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you tried
+      description: Other tools, settings or workarounds.
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Fit with Desks
+      options:
+        - label: This works with only the Accessibility permission (no Screen Recording, no SIP changes).
+        - label: I searched the existing issues and the README.

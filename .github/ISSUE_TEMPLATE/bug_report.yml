@@ -1,0 +1,64 @@
+name: Bug report
+description: Something does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. Please do not include private window titles or personal data.
+        If windows are stuck in a screen corner, press ⌃⌥⇧R (or use "Bring all windows back" in the menu bar menu) first.
+  - type: input
+    id: version
+    attributes:
+      label: Desks version
+      description: Settings > Permissions & About shows it.
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: "macOS 15.5, MacBook Pro M3"
+    validations:
+      required: true
+  - type: input
+    id: displays
+    attributes:
+      label: Displays
+      description: How many displays, and is Stage Manager on?
+      placeholder: "2 displays, Stage Manager off"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Press ⌃⌥2
+        2. ...
+  - type: input
+    id: app
+    attributes:
+      label: Which app has the problem?
+      description: Name and version, if only one app is affected.
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install Desks?
+      options:
+        - Release zip from GitHub
+        - Built from source
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: "Output of `log show --last 5m --predicate 'subsystem == \"io.github.desks.app\"'`. Remove private titles first."
+      render: shell

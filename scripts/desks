@@ -1,0 +1,117 @@
+#!/bin/sh
+# desks: control the Desks menu bar app from the command line.
+# It opens a desks:// URL in the background (open -g), so it does not take focus.
+# DESKS_DRY_RUN=1 prints the URL instead of opening it.
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: desks <command> [--display UUID|display-N]
+  switch N | move N      N is 1 to 10 (1 = first layout, 10 = tenth)
+  next | previous | new | sticky | overlay | rescue | pause | resume
+  save-arrangement | restore-arrangement
+  settings [page]        page: lowercase letters, for example rules
+  help
+USAGE
+}
+
+fail() {
+    echo "desks: $1" >&2
+    usage
+    exit 2
+}
+
+# Accepts 1 to 10 only, digits only, no leading zero.
+check_number() {
+    case "$1" in
+        [1-9] | 10) ;;
+        *) fail "number must be 1 to 10, got: $1" ;;
+    esac
+}
+
+[ $# -ge 1 ] || fail "missing command"
+CMD="$1"
+shift
+
+case "$CMD" in
+    help | -h | --help)
+        usage
+        exit 0
+        ;;
+esac
+
+ARG=""
+DISPLAY_ID=""
+
+# One positional argument (number or settings page) and an optional --display id.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --display)
+            [ $# -ge 2 ] || fail "--display needs a UUID or display-<digits>"
+            DISPLAY_ID="$2"
+            # Either a UUID (hex digits and dashes, 8 to 64 long) or the fallback id the app
+            # can produce, display-<digits>. Explicit lists, so locale collation cannot widen a range.
+            case "$DISPLAY_ID" in
+                display-*)
+                    DIGITS="${DISPLAY_ID#display-}"
+                    case "$DIGITS" in
+                        "" | *[!0123456789]*) fail "display id display-N needs digits after the dash" ;;
+                    esac
+                    [ ${#DIGITS} -le 10 ] || fail "display id has a wrong length"
+                    ;;
+                *)
+                    case "$DISPLAY_ID" in
+                        *[!0123456789abcdefABCDEF-]*) fail "display id must be a UUID or display-<digits>" ;;
+                    esac
+                    [ ${#DISPLAY_ID} -ge 8 ] && [ ${#DISPLAY_ID} -le 64 ] || fail "display id has a wrong length"
+                    ;;
+            esac
+            shift 2
+            ;;
+        -*) fail "unknown option: $1" ;;
+        *)
+            [ -z "$ARG" ] || fail "too many arguments"
+            ARG="$1"
+            shift
+            ;;
+    esac
+done
+
+case "$CMD" in
+    switch | move)
+        [ -n "$ARG" ] || fail "$CMD needs a number from 1 to 10"
+        check_number "$ARG"
+        PATH_PART="$CMD/$ARG"
+        ;;
+    next | previous | new | sticky | overlay | rescue | pause | resume | save-arrangement | restore-arrangement)
+        [ -z "$ARG" ] || fail "$CMD takes no argument"
+        PATH_PART="$CMD"
+        ;;
+    settings)
+        if [ -n "$ARG" ]; then
+            case "$ARG" in
+                *[!abcdefghijklmnopqrstuvwxyz-]*) fail "settings page may only contain lowercase letters and dashes" ;;
+            esac
+            [ ${#ARG} -le 32 ] || fail "settings page name is too long"
+            PATH_PART="settings/$ARG"
+        else
+            PATH_PART="settings"
+        fi
+        ;;
+    *) fail "unknown command: $CMD" ;;
+esac
+
+if [ -n "$DISPLAY_ID" ]; then
+    case "$CMD" in
+        switch | next | previous | new | save-arrangement | restore-arrangement) ;;
+        *) fail "--display does not apply to $CMD" ;;
+    esac
+fi
+
+URL="desks://$PATH_PART"
+[ -z "$DISPLAY_ID" ] || URL="$URL?display=$DISPLAY_ID"
+
+if [ "${DESKS_DRY_RUN:-}" = "1" ]; then
+    echo "$URL"
+else
+    exec /usr/bin/open -g "$URL"
+fi
