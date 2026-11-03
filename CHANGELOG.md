@@ -8,6 +8,7 @@ All notable changes to Desks are listed here. The format follows
 
 ### Fixed
 - Desks no longer takes focus away from system prompts (Touch ID, password sheets) or dialogs. After a window closes, Desks now moves focus only when it landed in a hidden window, or when the app has no window left on screen. Before, a closing popup (such as Chrome's autofill list) made Desks focus the last window again, which cancelled the Touch ID prompt.
+- Fewer focus changes Desks should not make: popups and tooltips closing no longer count as a window close, a close in a background app no longer moves focus in the front app, Desks does not take focus if another app (such as a Touch ID prompt) came to the front meanwhile, Cmd-H no longer brings the hidden app back, panels first seen while their app's windows are in another layout stay on screen and do not switch layouts, short popups (sign in, passkey) of the front app stay in the current layout instead of following a layout rule, and moving a window with the move overlay hands focus to another window of the layout.
 
 ## [0.2.0] - 2026-11-03
 

@@ -49,6 +49,13 @@ final class LiveEngine: DesksEngine {
     private var activatedPids: Set<pid_t> = []
     /// Last close, minimize, hide or quit per app.
     private var lastCloseAt: [pid_t: Date] = [:]
+    /// The front app from didActivateApplication, the one before it, and when it changed.
+    /// Tells if an app that hid or quit was the front app.
+    private var frontPid: pid_t?
+    private var previousFrontPid: pid_t?
+    private var frontChangedAt = Date.distantPast
+    /// Dialogs that were on screen together with their leader at least once. Only these are parked.
+    private var anchoredFollowers: Set<CGWindowID> = []
     /// Journal entries from an earlier run that could not be restored yet. Kept in the journal.
     private var legacyJournal: [JournalEntry] = []
 
@@ -92,14 +99,28 @@ final class LiveEngine: DesksEngine {
         self.tracker = tracker
         parking = ParkingEngine(tracker: tracker)
         tracker.onSnapshot = { [weak self] in self?.reconcile($0) }
-        tracker.onEvent = { [weak self] name, pid in
-            if name == kAXUIElementDestroyedNotification || name == kAXWindowMiniaturizedNotification {
-                self?.noteClose(pid)
+        tracker.onEvent = { [weak self] name, pid, windowId in
+            guard let self else { return }
+            if name == kAXWindowMiniaturizedNotification {
+                self.noteClose(pid)
+            } else if name == kAXUIElementDestroyedNotification, let windowId,
+                      self.live[windowId] != nil || self.followers[windowId] != nil
+                        || self.model.key(forWindowId: windowId) != nil {
+                // Only a member or a dialog. Popups and tooltips (Chrome autofill) also send this.
+                self.noteClose(pid)
             }
         }
         tracker.onAppGone = { [weak self] in self?.appGone($0) }
-        tracker.onAppHidden = { [weak self] in self?.noteClose($0) }
-        tracker.onAppActivated = { [weak self] in self?.activatedPids.insert($0) }
+        tracker.onAppHidden = { [weak self] in self?.noteClose($0, appLeft: true) }
+        tracker.onAppActivated = { [weak self] pid in
+            guard let self else { return }
+            self.activatedPids.insert(pid)
+            if pid != self.frontPid {
+                self.previousFrontPid = self.frontPid
+                self.frontPid = pid
+                self.frontChangedAt = Date()
+            }
+        }
         parking.onParked = { [weak self] id, frame in self?.parked(id, frameBefore: frame) }
     }
 
@@ -337,7 +358,10 @@ final class LiveEngine: DesksEngine {
     func moveWindow(_ token: WindowToken, toLayout id: Int) {
         guard status == .running, (0...LayoutModel.maxLayoutId).contains(id), let record = model.record(token.key) else { return }
         let connected = connectedSet
-        let wasFocused = focusedWindowToken() == token
+        // Desks itself is front when the move overlay had to activate it. Then the window the app
+        // had focused counts, since focus goes back to that app.
+        let desksFront = NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+        let wasFocused = focusedWindowToken() == token || (desksFront && focusedByPid[record.pid] == record.windowId)
         var uuid = record.display
         if !connected.contains(uuid), let main = mainUUID {
             // Orphan: it now belongs to the main display for good.
@@ -440,8 +464,16 @@ final class LiveEngine: DesksEngine {
         let connected = connectedSet
         let main = mainUUID
         let layout = model.current(on: uuid)
+        var hiddenApps: [pid_t: Bool] = [:]
+        func isHidden(_ pid: pid_t) -> Bool {
+            if let known = hiddenApps[pid] { return known }
+            let hidden = NSRunningApplication(processIdentifier: pid)?.isHidden ?? false
+            hiddenApps[pid] = hidden
+            return hidden
+        }
         func usable(_ key: String) -> WindowRecord? {
-            guard key != excluding, let record = model.record(key),
+            // A hidden app (Cmd-H) is skipped: focusing it would show it again.
+            guard key != excluding, let record = model.record(key), !isHidden(record.pid),
                   let window = live[record.windowId], !window.isMinimized,
                   model.isVisible(record, connected: connected, mainUUID: main),
                   model.placement(of: record, connected: connected, mainUUID: main).display == uuid else { return nil }
@@ -509,8 +541,8 @@ final class LiveEngine: DesksEngine {
             }
             return
         }
-        // A dialog of an app whose last focused window is parked.
-        guard followers[windowId] != nil, let leaderKey = lastMemberByPid[pid] else { return }
+        // A dialog of an app whose last focused window is parked. A dialog never shown with it stays here.
+        guard followers[windowId] != nil, anchoredFollowers.contains(windowId), let leaderKey = lastMemberByPid[pid] else { return }
         scheduleFocusSwitch(pid: pid, windowId: windowId) { [weak self] in
             guard let self, let leader = self.model.record(leaderKey),
                   !self.model.isVisible(leader, connected: self.connectedSet, mainUUID: self.mainUUID) else { return }
@@ -535,14 +567,18 @@ final class LiveEngine: DesksEngine {
 
     /// A window closed, minimized, or an app quit or hid. macOS now moves focus somewhere,
     /// maybe into a parked window: that must not switch layouts. Then focus the MRU window.
-    private func noteClose(_ pid: pid_t) {
+    /// `appLeft` is true for a hide or quit: then the app is no longer front.
+    private func noteClose(_ pid: pid_t, appLeft: Bool = false) {
         guard active else { return }
         lastCloseAt[pid] = Date()
         let until = Date().addingTimeInterval(0.3)
         if until > suppressFocusSwitchUntil { suppressFocusSwitchUntil = until }
         let display = lastFocusedDisplay
+        // A hidden or quit app was front if it still is, or if it was front just before the last switch.
+        let leftWhileFront = appLeft && (frontPid == pid
+            || (previousFrontPid == pid && Date().timeIntervalSince(frontChangedAt) < 2))
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            self?.focusAfterClose(display: display)
+            self?.focusAfterClose(display: display, closing: pid, leftWhileFront: leftWhileFront)
         }
     }
 
@@ -551,21 +587,33 @@ final class LiveEngine: DesksEngine {
     /// prompt such as Touch ID or a password sheet, a visible dialog, an app Desks does not track) is
     /// left alone: taking focus from it would cancel it. A popup closing (Chrome autofill) also sends
     /// a destroyed event, so this runs often.
-    private func focusAfterClose(display: String?) {
+    /// The "no window on screen" case only counts for the app that closed (or that hid or quit while
+    /// front): a close in a background app must not take focus from the front app.
+    private func focusAfterClose(display: String?, closing pid: pid_t, leftWhileFront: Bool) {
         guard active, let uuid = display.flatMap({ connectedSet.contains($0) ? $0 : nil }) ?? mainUUID else { return }
         guard let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               let watcher = tracker.watcher(front) else { return }
+        let checkEmpty = front == pid || leftWhileFront
         watcher.queue.async { [weak self] in
             let focused = AX.element(watcher.app, kAXFocusedWindowAttribute).flatMap(AX.windowId)
+            // All windows of the front app, also ones Desks does not manage (a panel, a tool window).
+            var others: [(id: CGWindowID, frame: CGRect)] = []
+            if focused == nil, checkEmpty {
+                for (id, element) in watcher.allElements() where AX.bool(element, kAXMinimizedAttribute) != true {
+                    if let frame = AX.frame(element) { others.append((id, frame)) }
+                }
+            }
             DispatchQueue.main.async {
                 guard let self, self.active,
                       NSWorkspace.shared.frontmostApplication?.processIdentifier == front else { return }
                 if let focused {
                     guard self.parking.isParked(focused) else { return }
                 } else {
+                    guard checkEmpty else { return }
                     let onScreen = self.live.values.contains {
                         $0.pid == front && !$0.isMinimized && !self.parking.isParked($0.windowId)
                     } || self.followers.values.contains { $0.pid == front && !self.parking.isParked($0.windowId) }
+                        || others.contains { !self.parking.isParked($0.id) && !Screens.looksParked($0.frame, in: self.screens) }
                     guard !onScreen else { return }
                 }
                 if !self.focusMRU(on: uuid, excluding: nil) { self.focusAwayFromParked() }
@@ -643,9 +691,16 @@ final class LiveEngine: DesksEngine {
                     }
                 }
             }
-            for (id, follower) in followers where follower.pid == pid && !seen.contains(id) {
+            let goneFollowers = followers.filter { $0.value.pid == pid && !seen.contains($0.key) }.map(\.key)
+            if !goneFollowers.isEmpty, missing.isEmpty,
+               !WindowTracker.existingWindowIds(for: pid).isSuperset(of: goneFollowers) {
+                // A dialog closed and its destroyed event came late or not at all.
+                noteClose(pid)
+            }
+            for id in goneFollowers {
                 followers[id] = nil
                 followerHome[id] = nil
+                anchoredFollowers.remove(id)
                 parking.forget(id)
             }
             for (id, window) in ignored where window.pid == pid && !seen.contains(id) { ignored[id] = nil }
@@ -814,7 +869,11 @@ final class LiveEngine: DesksEngine {
                 } else if let rule = matchRule(bundleId: bundleId, title: window.title) {
                     switch rule.action {
                     case .layout(let n) where (0...LayoutModel.maxLayoutId).contains(n):
-                        layout = ensureLayout(n, on: display) ?? layout
+                        // The app is front and has a window here: this is likely a short popup it opened
+                        // (sign in, passkey). It joins the current layout, so focus is not pulled away.
+                        if !hasVisibleFrontWindow(pid: window.pid, on: display) {
+                            layout = ensureLayout(n, on: display) ?? layout
+                        }
                     case .sticky:
                         sticky = true
                     case .layout, .ignore:
@@ -830,6 +889,18 @@ final class LiveEngine: DesksEngine {
                     // First seen in full screen: the real home frame is captured when it leaves full screen.
                     homeUnknown: window.isFullScreen ? true : nil))
             }
+        }
+    }
+
+    /// True when the app is front and has a shown, not minimized member in the current layout of the display.
+    private func hasVisibleFrontWindow(pid: pid_t, on display: String) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return false }
+        let connected = connectedSet
+        let main = mainUUID
+        return model.allRecords.contains { record in
+            record.pid == pid && live[record.windowId]?.isMinimized == false
+                && model.isVisible(record, connected: connected, mainUUID: main)
+                && model.placement(of: record, connected: connected, mainUUID: main).display == display
         }
     }
 
@@ -860,6 +931,7 @@ final class LiveEngine: DesksEngine {
         for (id, follower) in followers where follower.pid == pid {
             followers[id] = nil
             followerHome[id] = nil
+            anchoredFollowers.remove(id)
             parking.forget(id)
         }
         lastMemberByPid[pid] = nil
@@ -867,7 +939,8 @@ final class LiveEngine: DesksEngine {
         activatedPids.remove(pid)
         legacyJournal.removeAll { $0.pid == pid }
         ignored = ignored.filter { $0.value.pid != pid }
-        if active { noteClose(pid) }
+        if active { noteClose(pid, appLeft: true) }
+        if frontPid == pid { frontPid = nil }
         writeJournal()
         changed()
     }
@@ -909,8 +982,11 @@ final class LiveEngine: DesksEngine {
                                   home: rawHome, screen: screen))
         }
         for (id, follower) in followers {
-            guard let leaderKey = lastMemberByPid[follower.pid], let leader = model.record(leaderKey) else {
-                // No leader known: never parked. Bring it back if we parked it before.
+            let leader = lastMemberByPid[follower.pid].flatMap { model.record($0) }
+            if let leader, model.isVisible(leader, connected: connected, mainUUID: main) { anchoredFollowers.insert(id) }
+            guard let leader, anchoredFollowers.contains(id) else {
+                // No leader known, or first seen while its leader was hidden (a panel of an app whose
+                // last window is in another layout): never parked. Bring it back if we parked it before.
                 if parking.isParked(id) {
                     let screen = Screens.screen(for: followerHome[id] ?? follower.frame, in: screens) ?? screens.first
                     if let screen { desires.append(desire(follower, visible: true, home: followerHome[id] ?? follower.frame, screen: screen)) }

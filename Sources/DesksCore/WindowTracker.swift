@@ -47,7 +47,7 @@ private func axObserverCallback(_ observer: AXObserver, _ element: AXUIElement,
     guard let refcon else { return }
     // The source runs on the main run loop, so this is the main thread.
     let watcher = Unmanaged<AppWatcher>.fromOpaque(refcon).takeUnretainedValue()
-    watcher.received(notification as String)
+    watcher.received(notification as String, element: element)
 }
 
 /// Watches one app. AX calls run on its own serial queue; the observer source runs on the main run loop.
@@ -68,6 +68,11 @@ final class AppWatcher {
     private var observer: AXObserver?
     private var elements: [CGWindowID: AXUIElement] = [:]
     private var observed: Set<CGWindowID> = []
+    /// The element each window notification was added on. A destroyed element can not tell its id,
+    /// so the id is found here with CFEqual.
+    private var observedElements: [CGWindowID: AXUIElement] = [:]
+    /// Elements dropped by a snapshot, kept a few seconds: the destroyed event can come after the snapshot.
+    private var recentlyGone: [(id: CGWindowID, element: AXUIElement, at: Date)] = []
 
     init(pid: pid_t, bundleId: String) {
         self.pid = pid
@@ -115,23 +120,46 @@ final class AppWatcher {
         queue.async { [self] in
             if let observer {
                 for name in appNotifications { AXObserverRemoveNotification(observer, app, name as CFString) }
-                for (id, element) in elements where observed.contains(id) {
+                for element in observedElements.values {
                     for name in windowNotifications { AXObserverRemoveNotification(observer, element, name as CFString) }
                 }
             }
             observer = nil
             elements = [:]
             observed = []
+            observedElements = [:]
+            recentlyGone = []
         }
     }
 
     /// Main thread, from the AX callback.
-    func received(_ notification: String) {
+    func received(_ notification: String, element: AXUIElement) {
         guard !stopped else { return }
-        tracker?.event(notification, pid: pid)
+        guard notification == kAXUIElementDestroyedNotification else {
+            tracker?.event(notification, pid: pid, windowId: nil)
+            return
+        }
+        // Find which window was destroyed. Popups and tooltips send this too; the engine decides.
+        queue.async { [self] in
+            let id = destroyedWindowId(element)
+            DispatchQueue.main.async {
+                guard !self.stopped else { return }
+                self.tracker?.event(notification, pid: self.pid, windowId: id)
+            }
+        }
     }
 
     // MARK: Queue-only work
+
+    /// The id of a window element we observed, matched with CFEqual. Call on `queue`.
+    private func destroyedWindowId(_ element: AXUIElement) -> CGWindowID? {
+        if let (id, _) = observedElements.first(where: { CFEqual($0.value, element) }) {
+            observedElements[id] = nil
+            observed.remove(id)
+            return id
+        }
+        return recentlyGone.first { CFEqual($0.element, element) }?.id
+    }
 
     /// Reads all windows of the app. Call on `queue`.
     func readSnapshot() -> AppSnapshot {
@@ -160,10 +188,17 @@ final class AppWatcher {
             if let observer, !observed.contains(id) {
                 for name in windowNotifications { AXObserverAddNotification(observer, element, name as CFString, refcon) }
                 observed.insert(id)
+                observedElements[id] = element
             }
         }
         elements = fresh
         observed.formIntersection(fresh.keys)
+        let now = Date()
+        recentlyGone.removeAll { now.timeIntervalSince($0.at) > 5 }
+        for (id, element) in observedElements where fresh[id] == nil {
+            recentlyGone.append((id, element, now))
+            observedElements[id] = nil
+        }
         let focused = AX.element(app, kAXFocusedWindowAttribute).flatMap(AX.windowId)
         return AppSnapshot(pid: pid, bundleId: bundleId, windows: windows, focusedWindowId: focused, complete: true)
     }
@@ -198,8 +233,9 @@ final class WindowTracker {
     private var running = false
 
     var onSnapshot: ((AppSnapshot) -> Void)?
-    /// Raw AX notification name for an app (for close and focus handling).
-    var onEvent: ((String, pid_t) -> Void)?
+    /// Raw AX notification name for an app (for close and focus handling). For a destroyed event,
+    /// the window id when the element was one of the app's windows we observed, else nil.
+    var onEvent: ((String, pid_t, CGWindowID?) -> Void)?
     var onAppActivated: ((pid_t) -> Void)?
     var onAppGone: ((pid_t) -> Void)?
     var onAppHidden: ((pid_t) -> Void)?
@@ -328,8 +364,8 @@ final class WindowTracker {
     }
 
     /// Main thread, from AppWatcher.
-    func event(_ name: String, pid: pid_t) {
-        onEvent?(name, pid)
+    func event(_ name: String, pid: pid_t, windowId: CGWindowID?) {
+        onEvent?(name, pid, windowId)
         switch name {
         case kAXWindowCreatedNotification, kAXUIElementDestroyedNotification:
             // Destroyed is not reliable and new windows fill in late, so read again a few times.
