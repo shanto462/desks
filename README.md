@@ -4,7 +4,7 @@ Free layouts for every display on macOS. Switch between named groups of windows 
 
 [![CI](https://github.com/shanto462/desks/actions/workflows/ci.yml/badge.svg)](https://github.com/shanto462/desks/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/shanto462/desks)](https://github.com/shanto462/desks/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/shanto462/desks)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)
 
 <p align="center">
